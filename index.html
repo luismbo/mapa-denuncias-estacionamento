@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>v3 Mapa — Denúncias de Estacionamento</title>
+  <title>v4 Mapa — Denúncias de Estacionamento</title>
 
   <!-- Leaflet CSS -->
   <link
@@ -98,6 +98,8 @@
         <div>Marcadores visíveis: <span id="visibleCount">0</span></div>
         <div>Carregados: <span id="loadedCount">0</span></div>
       </div>
+
+      <div id="debug" style="margin-top:8px;font-size:13px;color:#444"></div>
 
       <hr style="margin:12px 0;" />
 
@@ -373,6 +375,15 @@
         return found || [];
       };
 
+      // Debug helper: write to debug panel and console
+      function debug(msg) {
+        try {
+          const el = document.getElementById('debug');
+          if (el) el.textContent = msg;
+        } catch (e) { /* ignore */ }
+        console.log('[map-debug]', msg);
+      }
+
       try {
         let aggregatedItems = [];
 
@@ -408,7 +419,9 @@
                 continue;
               }
               const data = await res.json();
-              aggregatedItems = aggregatedItems.concat(normalize(data));
+              const items = normalize(data);
+              console.log('[map-debug] fetched type', r.type, '-> items:', items.length);
+              aggregatedItems = aggregatedItems.concat(items);
             }
           }
         }
@@ -420,13 +433,17 @@
           const res = await fetch(url.toString());
           if (!res.ok) throw new Error('Erro ao carregar dados: ' + res.status);
           const data = await res.json();
-          aggregatedItems = normalize(data);
+          const items = normalize(data);
+          console.log('[map-debug] fetched generic DATA_URL -> items:', items.length);
+          aggregatedItems = aggregatedItems.concat(items);
         }
 
         // Add markers
+        let withCoords = 0, withoutCoords = 0;
         for (const item of aggregatedItems) {
           const latlng = getLatLng(item);
-          if (!latlng) continue;
+          if (!latlng) { withoutCoords++; continue; }
+          withCoords++;
           const typeKey = getTypeKey(item);
           const popup = buildPopupHtml(item);
           const marker = L.marker(latlng, { title: typeKey });
@@ -436,6 +453,7 @@
           allItems.push({ item, marker, typeKey });
         }
 
+        debug('fetched: ' + aggregatedItems.length + ' items — with coords: ' + withCoords + ', without coords: ' + withoutCoords);
         loadedCountEl.textContent = allItems.length;
         applyFilters();
 
