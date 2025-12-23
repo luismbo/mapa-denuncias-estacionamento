@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>[v9] Mapa — Denúncias de Estacionamento</title>
+  <title>[v10] Mapa — Denúncias de Estacionamento</title>
 
   <!-- Leaflet CSS -->
   <link
@@ -518,7 +518,12 @@
                 continue;
               }
               const data = await res.json();
-              const items = normalize(data);
+              let items = normalize(data);
+              // tag items with the type we fetched from so we can filter them later
+              items = items.map(it => {
+                try { if (it && typeof it === 'object') it._fetchedType = r.type; } catch(e) {}
+                return it;
+              });
               console.log('[map-debug] fetched type', r.type, '-> items:', items.length);
               aggregatedItems = aggregatedItems.concat(items);
             }
@@ -542,7 +547,10 @@
           const latlng = getLatLng(item);
           if (!latlng) { withoutCoords++; continue; }
           withCoords++;
-          const typeKey = getTypeKey(item);
+          let typeKey = getTypeKey(item);
+          if ((!typeKey || typeKey === 'unknown') && item && item._fetchedType) {
+            typeKey = String(item._fetchedType);
+          }
           const popup = buildPopupHtml(item);
           const marker = L.marker(latlng, { title: typeKey });
           marker.bindPopup(popup, { maxWidth: 450 });
