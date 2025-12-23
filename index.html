@@ -140,7 +140,6 @@
     // Common possibilities: /penalties, /penalties.json, /reports, /denuncias
     const DATA_URL = BASE_API + '/penalties';
     // Defaults
-    const DEFAULT_LIMIT = 200;
     const DEFAULT_TYPE = 'passeios';
 
     // Map & UI state
@@ -361,7 +360,6 @@
       // Last resort: fetch a small sample from DATA_URL and derive types from the items
       try {
         const sampleUrl = new URL(DATA_URL);
-        sampleUrl.searchParams.set('limit', 20);
         const sr = await fetch(sampleUrl.toString());
         if (sr.ok) {
           const sd = await sr.json();
@@ -430,7 +428,7 @@
     });
 
     // Load data
-    async function loadData(limit = 1000) {
+    async function loadData() {
       loadedCountEl.textContent = '...';
       clearData();
 
@@ -500,10 +498,9 @@
           }
 
           if (typesToFetch) {
-            // Fetch each type endpoint in parallel: DATA_URL/<type>?limit=...
+            // Fetch each type endpoint in parallel: DATA_URL/<type>
             const fetchPromises = typesToFetch.map(type => {
               const url = new URL(DATA_URL + '/' + encodeURIComponent(type));
-              url.searchParams.set('limit', limit);
               return fetch(url.toString()).then(res => ({ res, type })).catch(err => ({ err, type }));
             });
 
@@ -531,7 +528,6 @@
         // If no per-type fetches were performed (no filters), fallback to generic DATA_URL
         if (!aggregatedItems || aggregatedItems.length === 0) {
           const url = new URL(DATA_URL);
-          url.searchParams.set('limit', limit);
           const res = await fetch(url.toString());
           if (!res.ok) throw new Error('Erro ao carregar dados: ' + res.status);
           const data = await res.json();
@@ -633,8 +629,7 @@
     });
 
     document.getElementById('reload').addEventListener('click', () => {
-      const limit = Number(limitEl.value) || 1000;
-      loadData(limit);
+      loadData();
     });
 
     // init
@@ -645,8 +640,7 @@
       } catch (e) {
         console.warn('fetchPenaltiesList failed during init', e);
       }
-      const initialLimit = Number(limitEl.value) || 1000;
-      loadData(initialLimit);
+      loadData();
     })();
   </script>
 </body>
