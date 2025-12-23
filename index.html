@@ -281,32 +281,72 @@
 
     // Load data
     async function loadData(limit = 1000) {
-      // show loading state
       loadedCountEl.textContent = '...';
       clearData();
 
-      // Try to fetch data from DATA_URL; add a limit param if supported
-      const url = new URL(DATA_URL);
-      // Many APIs accept ?limit, ?per_page, etc. We try common params; the server may ignore unknown params.
-      url.searchParams.set('limit', limit);
+      // Determine whether the API expects a per-type path (e.g. /penalties/:type)
+      const hasFilterControls = filtersEl.querySelectorAll('input[type=checkbox]').length > 0;
+
+      // Helper to normalize response into an array of items
+      const normalize = data => {
+        if (Array.isArray(data)) return data;
+        if (data && Array.isArray(data.data)) return data.data;
+        if (data && typeof data === 'object') return Object.values(data);
+        return [];
+      };
 
       try {
-        const res = await fetch(url.toString());
-        if (!res.ok) throw new Error('Erro ao carregar dados: ' + res.status);
-        const data = await res.json();
-        // Data might be an object with a 'data' field, or an array
-        let items = Array.isArray(data) ? data : (Array.isArray(data.data) ? data.data : []);
-        if (!items || items.length === 0) {
-          // If nothing, attempt other common endpoints or structures
-          console.warn('Resposta sem array direto. Examinando keys...');
-          // Try if API returned object keyed by IDs
-          if (typeof data === 'object') {
-            items = Object.values(data);
+        let aggregatedItems = [];
+
+        if (hasFilterControls) {
+          // Determine which types to request. If user selected none (empty set), treat as all types.
+          let typesAvailable = Array.from(filtersEl.querySelectorAll('input[type=checkbox]')).map(cb => cb.dataset.type);
+          let typesToFetch = currentTypeFilter && currentTypeFilter.size > 0 ? Array.from(currentTypeFilter) : typesAvailable;
+
+          // If we still have no types (unexpected), fall back to single DATA_URL
+          if (!typesToFetch || typesToFetch.length === 0) {
+            typesToFetch = null;
+          }
+
+          if (typesToFetch) {
+            // Fetch each type endpoint in parallel: DATA_URL/<type>?limit=...
+            const fetchPromises = typesToFetch.map(type => {
+              const url = new URL(DATA_URL + '/' + encodeURIComponent(type));
+              url.searchParams.set('limit', limit);
+              return fetch(url.toString()).then(res => ({ res, type })).catch(err => ({ err, type }));
+            });
+
+            const results = await Promise.all(fetchPromises);
+
+            // Collect successful responses
+            for (const r of results) {
+              if (r.err) {
+                console.warn('Erro ao buscar tipo', r.type, r.err);
+                continue;
+              }
+              const res = r.res;
+              if (!res.ok) {
+                console.warn('Requisição retornou', res.status, 'for type', r.type);
+                continue;
+              }
+              const data = await res.json();
+              aggregatedItems = aggregatedItems.concat(normalize(data));
+            }
           }
         }
 
+        // If no per-type fetches were performed (no filters), fallback to generic DATA_URL
+        if (!aggregatedItems || aggregatedItems.length === 0) {
+          const url = new URL(DATA_URL);
+          url.searchParams.set('limit', limit);
+          const res = await fetch(url.toString());
+          if (!res.ok) throw new Error('Erro ao carregar dados: ' + res.status);
+          const data = await res.json();
+          aggregatedItems = normalize(data);
+        }
+
         // Add markers
-        for (const item of items) {
+        for (const item of aggregatedItems) {
           const latlng = getLatLng(item);
           if (!latlng) continue;
           const typeKey = getTypeKey(item);
@@ -320,7 +360,7 @@
 
         loadedCountEl.textContent = allItems.length;
         applyFilters();
-        // Fit bounds if there are markers
+
         if (markers.getLayers().length > 0) {
           document.getElementById('fit').disabled = false;
           map.fitBounds(markers.getBounds(), { maxZoom: 16 });
