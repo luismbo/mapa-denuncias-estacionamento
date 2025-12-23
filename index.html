@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>v6 Mapa — Denúncias de Estacionamento</title>
+  <title>v7 Mapa — Denúncias de Estacionamento</title>
 
   <!-- Leaflet CSS -->
   <link
@@ -569,9 +569,33 @@
       let visible = 0;
       // If no filter controls (not loaded) => show everything
       const hasFilters = filtersEl.querySelectorAll('input[type=checkbox]').length > 0;
+      // Helper: recursively search item for string values that match any selected filter
+      function itemMatchesFilter(obj, filterSet, depth = 0) {
+        if (!obj || depth > 8) return false;
+        if (typeof obj === 'string' || typeof obj === 'number') {
+          const s = String(obj).toLowerCase();
+          for (const f of filterSet) if (String(f).toLowerCase() === s) return true;
+          return false;
+        }
+        if (Array.isArray(obj)) {
+          for (const v of obj) if (itemMatchesFilter(v, filterSet, depth+1)) return true;
+          return false;
+        }
+        if (typeof obj === 'object') {
+          for (const v of Object.values(obj)) if (itemMatchesFilter(v, filterSet, depth+1)) return true;
+          return false;
+        }
+        return false;
+      }
+
       allItems.forEach(entry => {
         const type = entry.typeKey;
-        const shouldShow = (!hasFilters) || currentTypeFilter.size === 0 || currentTypeFilter.has(type);
+        let shouldShow = (!hasFilters) || currentTypeFilter.size === 0 || currentTypeFilter.has(type);
+        if (!shouldShow && hasFilters && currentTypeFilter.size > 0) {
+          // try matching against the item's content (attributes, nested fields)
+          shouldShow = itemMatchesFilter(entry.item, currentTypeFilter);
+        }
+
         if (shouldShow) {
           markers.addLayer(entry.marker);
           visible++;
