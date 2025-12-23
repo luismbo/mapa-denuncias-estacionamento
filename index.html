@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>v7 Mapa — Denúncias de Estacionamento</title>
+  <title>v8 Mapa — Denúncias de Estacionamento</title>
 
   <!-- Leaflet CSS -->
   <link
@@ -74,9 +74,9 @@
         <div style="margin-top:10px;">
           <label for="limit">Número de pontos a carregar:</label>
           <select id="limit" aria-label="limit">
-            <option value="200">200</option>
+            <option value="200" selected>200</option>
             <option value="500">500</option>
-            <option value="1000" selected>1000</option>
+            <option value="1000">1000</option>
             <option value="5000">5000</option>
           </select>
           <button id="reload" class="btn small">Carregar</button>
@@ -139,6 +139,9 @@
     // Primary data URL - if the real endpoint is different, change here.
     // Common possibilities: /penalties, /penalties.json, /reports, /denuncias
     const DATA_URL = BASE_API + '/penalties';
+    // Defaults
+    const DEFAULT_LIMIT = 200;
+    const DEFAULT_TYPE = 'passeios';
 
     // Map & UI state
     const map = L.map('map', { zoomControl: true }).setView([39.4, -8.2], 7); // default: Portugal center
@@ -394,14 +397,19 @@
         const wrapper = document.createElement('label');
         wrapper.className = 'filter-item';
         wrapper.innerHTML = `
-          <input type="checkbox" data-type="${escapeHtml(key)}" checked />
+          <input type="checkbox" data-type="${escapeHtml(key)}" />
           <span>${escapeHtml(name)}</span>
         `;
         filtersEl.appendChild(wrapper);
+        // apply default selection: select only DEFAULT_TYPE if it exists
+        try {
+          const cb = wrapper.querySelector('input[type=checkbox]');
+          if (cb) cb.checked = (key === DEFAULT_TYPE);
+        } catch (e) { }
       });
 
-      // initialize currentTypeFilter as all selected
-      currentTypeFilter = new Set(Array.from(filtersEl.querySelectorAll('input[type=checkbox]')).map(cb => cb.dataset.type));
+      // initialize currentTypeFilter based on checked boxes (defaults applied above)
+      currentTypeFilter = new Set(Array.from(filtersEl.querySelectorAll('input[type=checkbox]:checked')).map(cb => cb.dataset.type));
 
       // attach event
       filtersEl.addEventListener('change', onFilterChange);
