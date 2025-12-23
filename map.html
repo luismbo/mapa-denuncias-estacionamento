@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Mapa — Denúncias de Estacionamento</title>
+
+  <!-- Leaflet CSS -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-sA+Y1F4G4+Q4n6k9e2gJtL3a2k2u8dB4JmWv9Zf3qQA="
+    crossorigin=""
+  />
+  <!-- MarkerCluster CSS -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css"
+  />
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css"
+  />
+
+  <style>
+    html, body, #map { height: 100%; margin: 0; padding: 0; }
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; }
+    #app {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      height: 100vh;
+      gap: 0;
+    }
+    #sidebar {
+      padding: 12px;
+      box-sizing: border-box;
+      background: #f8f9fb;
+      border-right: 1px solid #e2e6ea;
+      overflow: auto;
+    }
+    #map-wrap { position: relative; }
+    #controls { margin-bottom: 12px; }
+    h1 { font-size: 18px; margin: 0 0 8px 0; }
+    label.filter-item { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+    .badge { font-size: 12px; color: #666; margin-left: 6px; }
+    #status { font-size: 13px; color: #333; margin-top: 8px; }
+    button, .btn {
+      display: inline-block;
+      padding: 6px 10px;
+      border-radius: 6px;
+      border: 1px solid #bbb;
+      background: #fff;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    button:active { transform: translateY(1px); }
+    .small { padding: 4px 8px; font-size: 12px; }
+    #filters { margin-top: 8px; }
+    #loadMore { margin-top: 8px; }
+    .muted { color: #666; font-size: 13px; }
+    a.link { color: #0366d6; text-decoration: none; }
+    pre { white-space: pre-wrap; word-wrap: break-word; font-size: 12px; background: #fff; padding: 8px; border-radius: 6px; border: 1px solid #eee; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar" aria-labelledby="title">
+      <h1 id="title">Mapa de denúncias</h1>
+
+      <div id="controls">
+        <div>
+          <button id="fit" class="btn small">Ajustar à visualização</button>
+          <button id="clear" class="btn small">Limpar marcadores</button>
+        </div>
+
+        <div style="margin-top:10px;">
+          <label for="limit">Número de pontos a carregar:</label>
+          <select id="limit" aria-label="limit">
+            <option value="200">200</option>
+            <option value="500">500</option>
+            <option value="1000" selected>1000</option>
+            <option value="5000">5000</option>
+          </select>
+          <button id="reload" class="btn small">Carregar</button>
+        </div>
+      </div>
+
+      <div>
+        <strong>Filtrar por tipo de evento</strong>
+        <div id="filters" role="group" aria-label="Filtros de tipos">
+          <div class="muted">Carregando tipos…</div>
+        </div>
+      </div>
+
+      <div style="margin-top:12px;">
+        <button id="toggleAll" class="btn small">Marcar / Desmarcar tudo</button>
+      </div>
+
+      <div id="status" aria-live="polite">
+        <div>Marcadores visíveis: <span id="visibleCount">0</span></div>
+        <div>Carregados: <span id="loadedCount">0</span></div>
+      </div>
+
+      <hr style="margin:12px 0;" />
+
+      <div>
+        <div class="muted">API:</div>
+        <div><a class="link" href="https://denuncia-estacionamento.app/api.html" target="_blank">Documentação</a></div>
+        <div style="margin-top:6px;"><a class="link" href="https://api.denuncia-estacionamento.app/penalties_list" target="_blank">/penalties_list</a></div>
+      </div>
+
+      <hr style="margin:12px 0;" />
+      <div>
+        <div class="muted">Observações:</div>
+        <ul>
+          <li>Se o endpoint de denúncias for diferente substitua a variável <code>DATA_URL</code> no script.</li>
+          <li>O script tenta detectar latitude/longitude em campos comuns; se necessário ajuste a função <code>getLatLng</code>.</li>
+        </ul>
+      </div>
+    </aside>
+
+    <div id="map-wrap">
+      <div id="map"></div>
+    </div>
+  </div>
+
+  <!-- Leaflet JS -->
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-o9N1j7k0G8jF0p3x1x2k2P1Jxg1c0UXXwW3bRtVx+gk="
+    crossorigin=""
+  ></script>
+
+  <!-- MarkerCluster JS -->
+  <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+
+  <script>
+    // Configuration: change these if the API endpoints differ
+    const BASE_API = 'https://api.denuncia-estacionamento.app';
+    const PENALTIES_LIST_URL = BASE_API + '/penalties_list';
+    // Primary data URL - if the real endpoint is different, change here.
+    // Common possibilities: /penalties, /penalties.json, /reports, /denuncias
+    const DATA_URL = BASE_API + '/penalties';
+
+    // Map & UI state
+    const map = L.map('map', { zoomControl: true }).setView([-23.55, -46.63], 12); // default: São Paulo center
+    const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    // Marker cluster group
+    const markers = L.markerClusterGroup();
+    map.addLayer(markers);
+
+    // Storage of all loaded items and marker references
+    let allItems = []; // { item: <object>, marker: <L.marker>, typeKey: string }
+    let currentTypeFilter = new Set(); // selected types (if empty -> treat as all selected)
+
+    // UI elements
+    const filtersEl = document.getElementById('filters');
+    const visibleCountEl = document.getElementById('visibleCount');
+    const loadedCountEl = document.getElementById('loadedCount');
+    const limitEl = document.getElementById('limit');
+
+    // Utility: robustly get lat/lng from a payload item
+    function getLatLng(item) {
+      // common patterns
+      // 1) item.lat & item.lon or latitude & longitude
+      if (item.lat && item.lon) return [Number(item.lat), Number(item.lon)];
+      if (item.latitude && item.longitude) return [Number(item.latitude), Number(item.longitude)];
+      if (item.lat && item.lng) return [Number(item.lat), Number(item.lng)];
+      if (item.location && item.location.latitude && item.location.longitude) {
+        return [Number(item.location.latitude), Number(item.location.longitude)];
+      }
+      // geometry.geojson / geometry coordinates: GeoJSON [lng, lat]
+      if (item.geometry && item.geometry.coordinates && Array.isArray(item.geometry.coordinates)) {
+        const c = item.geometry.coordinates;
+        // ensure numbers
+        return [Number(c[1]), Number(c[0])];
+      }
+      if (item.geojson && item.geojson.coordinates) {
+        const c = item.geojson.coordinates;
+        return [Number(c[1]), Number(c[0])];
+      }
+      // Some APIs return 'coordinates' as object {lat, lng}
+      if (item.coordinates && item.coordinates.lat && item.coordinates.lng) {
+        return [Number(item.coordinates.lat), Number(item.coordinates.lng)];
+      }
+      // fallback: no coordinates found
+      return null;
+    }
+
+    // Utility: determine the "type" key on an item
+    function getTypeKey(item) {
+      // Try fields commonly used: penalty, type, kind, category
+      if (item.penalty) return String(item.penalty);
+      if (item.type) return String(item.type);
+      if (item.kind) return String(item.kind);
+      if (item.category) return String(item.category);
+      // Some APIs use 'penalty_id' or 'penalty_type'
+      if (item.penalty_type) return String(item.penalty_type);
+      if (item.penalty_id) return String(item.penalty_id);
+      // If none found, return 'unknown'
+      return 'unknown';
+    }
+
+    // Build popup content (simple)
+    function buildPopupHtml(item) {
+      const lines = [];
+      if (item.title) lines.push('<strong>' + escapeHtml(item.title) + '</strong>');
+      // list some common fields
+      ['description','detail','comment','created_at','date','city','address','street'].forEach(k => {
+        if (item[k]) lines.push('<div><strong>' + escapeHtml(k) + ':</strong> ' + escapeHtml(String(item[k])) + '</div>');
+      });
+      // fallback: show JSON snippet
+      lines.push('<hr><div><small>Dados completos:</small><pre>' + escapeHtml(JSON.stringify(item, null, 2)) + '</pre></div>');
+      return lines.join('\n');
+    }
+
+    function escapeHtml(s) {
+      return s.replace(/[&<>\"']/g, function (m) {
+        return ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[m];
+      });
+    }
+
+    // Fetch the list of penalty types and build filter controls
+    async function fetchPenaltiesList() {
+      try {
+        const res = await fetch(PENALTIES_LIST_URL);
+        if (!res.ok) throw new Error('Erro ao obter /penalties_list: ' + res.status);
+        const data = await res.json();
+        // data might be an array of strings or objects {id, name}
+        buildFilterControls(data);
+      } catch (err) {
+        console.error(err);
+        filtersEl.innerHTML = '<div class="muted">Não foi possível carregar tipos. Verifique a URL: ' + PENALTIES_LIST_URL + '</div>';
+      }
+    }
+
+    // Create filter checkboxes from retrieved list
+    function buildFilterControls(list) {
+      filtersEl.innerHTML = '';
+      if (!Array.isArray(list) || list.length === 0) {
+        filtersEl.innerHTML = '<div class="muted">Lista vazia</div>';
+        return;
+      }
+      list.forEach(entry => {
+        let id, name;
+        if (typeof entry === 'string') { id = entry; name = entry; }
+        else if (entry && (entry.id || entry.key)) { id = entry.id || entry.key; name = entry.name || entry.title || id; }
+        else { id = JSON.stringify(entry); name = String(entry); }
+
+        const key = String(id);
+
+        const wrapper = document.createElement('label');
+        wrapper.className = 'filter-item';
+        wrapper.innerHTML = `
+          <input type="checkbox" data-type="${escapeHtml(key)}" checked />
+          <span>${escapeHtml(name)}</span>
+        `;
+        filtersEl.appendChild(wrapper);
+      });
+
+      // initialize currentTypeFilter as all selected
+      currentTypeFilter = new Set(Array.from(filtersEl.querySelectorAll('input[type=checkbox]')).map(cb => cb.dataset.type));
+
+      // attach event
+      filtersEl.addEventListener('change', onFilterChange);
+    }
+
+    function onFilterChange() {
+      const checked = Array.from(filtersEl.querySelectorAll('input[type=checkbox]:checked')).map(cb => cb.dataset.type);
+      currentTypeFilter = new Set(checked);
+      applyFilters();
+    }
+
+    // Toggle all
+    document.getElementById('toggleAll').addEventListener('click', () => {
+      const boxes = Array.from(filtersEl.querySelectorAll('input[type=checkbox]'));
+      const allChecked = boxes.every(cb => cb.checked);
+      boxes.forEach(cb => cb.checked = !allChecked);
+      onFilterChange();
+    });
+
+    // Load data
+    async function loadData(limit = 1000) {
+      // show loading state
+      loadedCountEl.textContent = '...';
+      clearData();
+
+      // Try to fetch data from DATA_URL; add a limit param if supported
+      const url = new URL(DATA_URL);
+      // Many APIs accept ?limit, ?per_page, etc. We try common params; the server may ignore unknown params.
+      url.searchParams.set('limit', limit);
+
+      try {
+        const res = await fetch(url.toString());
+        if (!res.ok) throw new Error('Erro ao carregar dados: ' + res.status);
+        const data = await res.json();
+        // Data might be an object with a 'data' field, or an array
+        let items = Array.isArray(data) ? data : (Array.isArray(data.data) ? data.data : []);
+        if (!items || items.length === 0) {
+          // If nothing, attempt other common endpoints or structures
+          console.warn('Resposta sem array direto. Examinando keys...');
+          // Try if API returned object keyed by IDs
+          if (typeof data === 'object') {
+            items = Object.values(data);
+          }
+        }
+
+        // Add markers
+        for (const item of items) {
+          const latlng = getLatLng(item);
+          if (!latlng) continue;
+          const typeKey = getTypeKey(item);
+          const popup = buildPopupHtml(item);
+          const marker = L.marker(latlng, { title: typeKey });
+          marker.bindPopup(popup, { maxWidth: 450 });
+          marker._ourType = typeKey; // store for filtering
+          markers.addLayer(marker);
+          allItems.push({ item, marker, typeKey });
+        }
+
+        loadedCountEl.textContent = allItems.length;
+        applyFilters();
+        // Fit bounds if there are markers
+        if (markers.getLayers().length > 0) {
+          document.getElementById('fit').disabled = false;
+          map.fitBounds(markers.getBounds(), { maxZoom: 16 });
+        } else {
+          document.getElementById('fit').disabled = true;
+        }
+      } catch (err) {
+        console.error(err);
+        loadedCountEl.textContent = 'Erro';
+        alert('Erro ao carregar dados: ' + err.message + '\nVerifique a URL DATA_URL e CORS.');
+      }
+    }
+
+    // Apply filters to markers
+    function applyFilters() {
+      let visible = 0;
+      // If no filter controls (not loaded) => show everything
+      const hasFilters = filtersEl.querySelectorAll('input[type=checkbox]').length > 0;
+      allItems.forEach(entry => {
+        const type = entry.typeKey;
+        const shouldShow = (!hasFilters) || currentTypeFilter.size === 0 || currentTypeFilter.has(type);
+        if (shouldShow) {
+          markers.addLayer(entry.marker);
+          visible++;
+        } else {
+          markers.removeLayer(entry.marker);
+        }
+      });
+      visibleCountEl.textContent = visible;
+    }
+
+    // Clear currently loaded markers
+    function clearData() {
+      markers.clearLayers();
+      allItems = [];
+      visibleCountEl.textContent = 0;
+      loadedCountEl.textContent = 0;
+    }
+
+    // UI buttons
+    document.getElementById('fit').addEventListener('click', () => {
+      if (markers.getLayers().length === 0) return alert('Nenhum marcador visível.');
+      map.fitBounds(markers.getBounds(), { maxZoom: 16 });
+    });
+
+    document.getElementById('clear').addEventListener('click', () => {
+      clearData();
+    });
+
+    document.getElementById('reload').addEventListener('click', () => {
+      const limit = Number(limitEl.value) || 1000;
+      loadData(limit);
+    });
+
+    // init
+    (function init() {
+      // initial load of types + data
+      fetchPenaltiesList();
+      const initialLimit = Number(limitEl.value) || 1000;
+      loadData(initialLimit);
+    })();
+  </script>
+</body>
+</html>
