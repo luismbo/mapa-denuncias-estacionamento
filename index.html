@@ -270,6 +270,18 @@
       return result || null;
     }
 
+      // Return true when a lat/lng pair lies within continental Portugal, Azores or Madeira
+      function isWithinPortugalBounds(lat, lng) {
+        if (typeof lat !== 'number' || typeof lng !== 'number') return false;
+        // Mainland Portugal (inclusive bbox)
+        if (lat >= 36.7 && lat <= 42.2 && lng >= -9.6 && lng <= -6.0) return true;
+        // Madeira
+        if (lat >= 32.5 && lat <= 33.4 && lng >= -17.4 && lng <= -16.4) return true;
+        // Azores (broad bbox covering the main islands)
+        if (lat >= 36.0 && lat <= 40.0 && lng >= -31.6 && lng <= -24.4) return true;
+        return false;
+      }
+
     // Utility: determine the "type" key on an item
     function getTypeKey(item) {
       // Try fields commonly used: penalty, type, kind, category
@@ -537,25 +549,37 @@
           aggregatedItems = aggregatedItems.concat(items);
         }
 
-        // Add markers
-        let withCoords = 0, withoutCoords = 0;
+        // Add markers (batch into array to avoid repeated DOM updates)
+        let withCoords = 0, withoutCoords = 0, outOfPortugal = 0;
+        const newMarkers = [];
         for (const item of aggregatedItems) {
           const latlng = getLatLng(item);
           if (!latlng) { withoutCoords++; continue; }
+          // latlng is [lat, lng]
+          const lat = Number(latlng[0]);
+          const lng = Number(latlng[1]);
+          if (!isWithinPortugalBounds(lat, lng)) { outOfPortugal++; continue; }
           withCoords++;
           let typeKey = getTypeKey(item);
           if ((!typeKey || typeKey === 'unknown') && item && item._fetchedType) {
             typeKey = String(item._fetchedType);
           }
-          const popup = buildPopupHtml(item);
           const marker = L.marker(latlng, { title: typeKey });
-          marker.bindPopup(popup, { maxWidth: 450 });
+          // Defer constructing popup HTML until user clicks (saves CPU/memory for large sets)
+          marker.on('click', function () {
+            if (!this.getPopup()) {
+              this.bindPopup(buildPopupHtml(item), { maxWidth: 450 }).openPopup();
+            }
+          });
           marker._ourType = typeKey; // store for filtering
-          markers.addLayer(marker);
+          newMarkers.push(marker);
           allItems.push({ item, marker, typeKey });
         }
 
-        debug('fetched: ' + aggregatedItems.length + ' items — with coords: ' + withCoords + ', without coords: ' + withoutCoords);
+        // Add all markers to the cluster in one batch operation
+        if (newMarkers.length) markers.addLayers(newMarkers);
+
+        debug('fetched: ' + aggregatedItems.length + ' items — with coords: ' + withCoords + ', without coords: ' + withoutCoords + ', out-of-Portugal: ' + outOfPortugal);
         loadedCountEl.textContent = allItems.length;
         applyFilters();
 
