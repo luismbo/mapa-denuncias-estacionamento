@@ -453,7 +453,21 @@
       lines.push('<div style="font-size:15px;font-weight:bold;margin-bottom:8px;color:#333;">' + escapeHtml(typeName) + '</div>');
       
       // Date
-      const dateStr = getValue('created_at') || getValue('date') || getValue('timestamp') || getValue('data');
+      const dataData = getValue('data_data');
+      const dataHora = getValue('data_hora');
+      let dateStr = null;
+      
+      if (dataData && dataHora) {
+        // Combine date and time
+        const dateOnly = dataData.split('T')[0];
+        dateStr = dateOnly + 'T' + dataHora;
+      } else if (dataData) {
+        dateStr = dataData;
+      } else {
+        // Fallback to other common date fields
+        dateStr = getValue('created_at') || getValue('date') || getValue('timestamp') || getValue('data');
+      }
+      
       if (dateStr) {
         const formattedDate = formatDate(dateStr);
         lines.push('<div style="margin-bottom:6px;"><strong>📅 Data:</strong> ' + escapeHtml(formattedDate) + '</div>');
