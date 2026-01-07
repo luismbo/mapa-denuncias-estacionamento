@@ -131,7 +131,9 @@
 
       <div id="controls">
         <div>
-          <button id="fit" class="btn small">Ajustar à visualização</button>
+          <button id="fit" class="btn small">Enquadrar</button>
+          <button id="selectAll" class="btn small">Todos</button>
+          <button id="selectNone" class="btn small">Nenhum</button>
         </div>
       </div>
 
@@ -140,10 +142,6 @@
         <div id="filters" role="group" aria-label="Filtros de tipos">
           <div class="muted">Carregando tipos…</div>
         </div>
-      </div>
-
-      <div style="margin-top:12px;">
-        <button id="toggleAll" class="btn small">Marcar / Desmarcar tudo</button>
       </div>
 
       <div id="status" aria-live="polite">
@@ -527,11 +525,16 @@
       loadData();
     }
 
-    // Toggle all
-    document.getElementById('toggleAll').addEventListener('click', () => {
+    // Select all / none
+    document.getElementById('selectAll').addEventListener('click', () => {
       const boxes = Array.from(filtersEl.querySelectorAll('input[type=checkbox]'));
-      const allChecked = boxes.every(cb => cb.checked);
-      boxes.forEach(cb => cb.checked = !allChecked);
+      boxes.forEach(cb => cb.checked = true);
+      onFilterChange();
+    });
+
+    document.getElementById('selectNone').addEventListener('click', () => {
+      const boxes = Array.from(filtersEl.querySelectorAll('input[type=checkbox]'));
+      boxes.forEach(cb => cb.checked = false);
       onFilterChange();
     });
 
@@ -596,16 +599,11 @@
         let aggregatedItems = [];
 
         if (hasFilterControls) {
-          // Determine which types to request. If user selected none (empty set), treat as all types.
+          // Determine which types to request. If user selected none (empty set), don't fetch anything.
           let typesAvailable = Array.from(filtersEl.querySelectorAll('input[type=checkbox]')).map(cb => cb.dataset.type);
-          let typesToFetch = currentTypeFilter && currentTypeFilter.size > 0 ? Array.from(currentTypeFilter) : typesAvailable;
+          let typesToFetch = currentTypeFilter && currentTypeFilter.size > 0 ? Array.from(currentTypeFilter) : null;
 
-          // If we still have no types (unexpected), fall back to single DATA_URL
-          if (!typesToFetch || typesToFetch.length === 0) {
-            typesToFetch = null;
-          }
-
-          if (typesToFetch) {
+          if (typesToFetch && typesToFetch.length > 0) {
             // Fetch each type endpoint in parallel: DATA_URL/<type>
             const fetchPromises = typesToFetch.map(type => {
               const url = new URL(DATA_URL + '/' + encodeURIComponent(type));
@@ -636,10 +634,8 @@
               aggregatedItems = aggregatedItems.concat(items);
             }
           }
-        }
-
-        // If no per-type fetches were performed (no filters), fallback to generic DATA_URL
-        if (!aggregatedItems || aggregatedItems.length === 0) {
+        } else if (!hasFilterControls) {
+          // No filter controls exist, fallback to generic DATA_URL
           const url = new URL(DATA_URL);
           const res = await fetch(url.toString());
           if (!res.ok) throw new Error('Erro ao carregar dados: ' + res.status);
