@@ -1,0 +1,715 @@
+// Detect mobile and setup sidebar toggle
+function setupMobileUI() {
+  const toggleBtn = document.getElementById('toggle-sidebar');
+  const sidebar = document.getElementById('sidebar');
+  const isMobile = window.innerWidth <= 768;
+  
+  if (isMobile) {
+    toggleBtn.style.display = 'flex';
+    sidebar.classList.remove('open');
+  } else {
+    toggleBtn.style.display = 'none';
+    sidebar.classList.add('open');
+  }
+  
+  toggleBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    sidebar.classList.toggle('open');
+  });
+  
+  // Close sidebar when clicking on map
+  document.getElementById('map').addEventListener('click', () => {
+    if (isMobile) sidebar.classList.remove('open');
+  });
+  
+  // Close sidebar when clicking filter items
+  if (window.innerWidth <= 768) {
+    const filtersEl = document.getElementById('filters');
+    filtersEl.addEventListener('change', () => {
+      sidebar.classList.remove('open');
+    });
+  }
+}
+
+// Reinitialize on resize
+let resizeTimer;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    setupMobileUI();
+    // Notify Leaflet that the map container size may have changed
+    if (typeof map !== 'undefined' && map.invalidateSize) {
+      setTimeout(() => map.invalidateSize(), 100);
+    }
+  }, 250);
+});
+
+// Configuration: change these if the API endpoints differ
+const BASE_API = 'https://api.denuncia-estacionamento.app';
+const PENALTIES_LIST_URL = BASE_API + '/penalties_list';
+// Primary data URL - if the real endpoint is different, change here.
+// Common possibilities: /penalties, /penalties.json, /reports, /denuncias
+const DATA_URL = BASE_API + '/penalties';
+// Defaults
+const DEFAULT_TYPE = 'passeios';
+
+// Map & UI state
+const map = L.map('map', { zoomControl: true }).setView([39.4, -8.2], 7); // default: Portugal center
+const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19,
+  attribution: '&copy; OpenStreetMap contributors'
+}).addTo(map);
+
+// Marker cluster group
+const markers = L.markerClusterGroup();
+map.addLayer(markers);
+
+// Storage of all loaded items and marker references
+let allItems = []; // { item: <object>, marker: <L.marker>, typeKey: string }
+let currentTypeFilter = new Set(); // selected types (if empty -> treat as all selected)
+let penaltiesListData = []; // Store penalties_list data for popup reference
+
+// UI elements
+const filtersEl = document.getElementById('filters');
+const visibleCountEl = document.getElementById('visibleCount');
+const loadedCountEl = document.getElementById('loadedCount');
+
+// Utility: robustly get lat/lng from a payload item (recursive search)
+function getLatLng(item) {
+  if (!item) return null;
+
+  const isFiniteNumber = v => typeof v === 'number' && isFinite(v);
+  const toNumber = v => {
+    if (isFiniteNumber(v)) return v;
+    if (typeof v === 'string' && v.trim() !== '') {
+      const n = Number(v.replace(',', '.'));
+      return isFiniteNumber(n) ? n : null;
+    }
+    return null;
+  };
+
+  const isLat = v => v >= -90 && v <= 90;
+  const isLng = v => v >= -180 && v <= 180;
+
+  function pairFromArray(arr) {
+    if (!Array.isArray(arr) || arr.length < 2) return null;
+    const a = toNumber(arr[0]);
+    const b = toNumber(arr[1]);
+    if (a === null || b === null) return null;
+    // Try [lat, lng]
+    if (isLat(a) && isLng(b)) return [a, b];
+    // Try [lng, lat]
+    if (isLat(b) && isLng(a)) return [b, a];
+    return null;
+  }
+
+  function pairFromObject(obj) {
+    if (!obj || typeof obj !== 'object') return null;
+    const keys = Object.keys(obj).map(k => k.toLowerCase());
+    const get = k => toNumber(obj[k]);
+
+    // common pairs
+    const mapping = [
+      ['lat','lon'], ['lat','lng'], ['latitude','longitude'], ['latitude','lng'], ['lat','longitude']
+    ];
+    for (const [aKey,bKey] of mapping) {
+      if (aKey in obj && bKey in obj) {
+        const a = toNumber(obj[aKey]);
+        const b = toNumber(obj[bKey]);
+        if (a !== null && b !== null && isLat(a) && isLng(b)) return [a,b];
+        if (a !== null && b !== null && isLat(b) && isLng(a)) return [b,a];
+      }
+    }
+
+    // coordinates as object {lat, lng} or {latitude, longitude}
+    if ('lat' in obj && 'lng' in obj) {
+      const a = toNumber(obj.lat), b = toNumber(obj.lng);
+      if (a !== null && b !== null) return [a,b];
+    }
+    if ('latitude' in obj && 'longitude' in obj) {
+      const a = toNumber(obj.latitude), b = toNumber(obj.longitude);
+      if (a !== null && b !== null) return [a,b];
+    }
+
+    // Heuristic: detect keys that include 'lat' and keys that include 'lon'|'long'|'lng'
+    let latKey = null, lonKey = null;
+    for (const k of Object.keys(obj)) {
+      const kl = k.toLowerCase();
+      if (!latKey && kl.includes('lat')) latKey = k;
+      if (!lonKey && (kl.includes('lon') || kl.includes('long') || kl.includes('lng'))) lonKey = k;
+    }
+    if (latKey && lonKey) {
+      const a = toNumber(obj[latKey]);
+      const b = toNumber(obj[lonKey]);
+      if (a !== null && b !== null) return [a,b];
+    }
+
+    return null;
+  }
+
+  // deep search for arrays/objects that look like coordinates
+  function find(obj, depth = 0) {
+    if (!obj || depth > 8) return null;
+    // Arrays
+    if (Array.isArray(obj)) {
+      const p = pairFromArray(obj);
+      if (p) return p;
+      for (const el of obj) {
+        const r = find(el, depth+1);
+        if (r) return r;
+      }
+      return null;
+    }
+    // Objects
+    if (typeof obj === 'object') {
+      // GeoJSON geometry coordinates [lng, lat]
+      if (obj.geometry && Array.isArray(obj.geometry.coordinates)) {
+        const p = pairFromArray(obj.geometry.coordinates);
+        if (p) return p;
+      }
+      if (obj.geojson && Array.isArray(obj.geojson.coordinates)) {
+        const p = pairFromArray(obj.geojson.coordinates);
+        if (p) return p;
+      }
+      // direct coordinate object
+      const fromObj = pairFromObject(obj);
+      if (fromObj) return fromObj;
+
+      // check common container keys
+      for (const k of ['location','coordinates','position','point','coords','geometry']) {
+        if (k in obj) {
+          const r = find(obj[k], depth+1);
+          if (r) return r;
+        }
+      }
+
+      // otherwise scan values
+      for (const v of Object.values(obj)) {
+        const r = find(v, depth+1);
+        if (r) return r;
+      }
+    }
+    return null;
+  }
+
+  const result = find(item);
+  return result || null;
+}
+
+  // Return true when a lat/lng pair lies within continental Portugal, Azores or Madeira
+  function isWithinPortugalBounds(lat, lng) {
+    if (typeof lat !== 'number' || typeof lng !== 'number') return false;
+    // Mainland Portugal (inclusive bbox)
+    if (lat >= 36.7 && lat <= 42.2 && lng >= -9.6 && lng <= -6.0) return true;
+    // Madeira
+    if (lat >= 32.5 && lat <= 33.4 && lng >= -17.4 && lng <= -16.4) return true;
+    // Azores (broad bbox covering the main islands)
+    if (lat >= 36.0 && lat <= 40.0 && lng >= -31.6 && lng <= -24.4) return true;
+    return false;
+  }
+
+// Utility: determine the "type" key on an item
+function getTypeKey(item) {
+  // Check attributes object first (common in JSON:API format)
+  const attrs = item.attributes || {};
+  
+  // Priority order: penalty code/id fields first
+  if (attrs.penalty) return String(attrs.penalty);
+  if (attrs.code) return String(attrs.code);
+  if (item.penalty) return String(item.penalty);
+  if (attrs.penalty_type) return String(attrs.penalty_type);
+  if (attrs.penalty_id) return String(attrs.penalty_id);
+  if (item.penalty_type) return String(item.penalty_type);
+  if (item.penalty_id) return String(item.penalty_id);
+  
+  // Then try type/kind/category fields
+  if (attrs.type) return String(attrs.type);
+  if (attrs.kind) return String(attrs.kind);
+  if (attrs.category) return String(attrs.category);
+  if (item.kind) return String(item.kind);
+  if (item.category) return String(item.category);
+  
+  // Use item.type only if not generic "penalty_record"
+  if (item.type && item.type !== 'penalty_record') return String(item.type);
+  
+  // Last resort: use item id from attributes
+  if (item.id) return String(item.id);
+  
+  // If none found, return 'unknown'
+  return 'unknown';
+}
+
+// Build popup content (human-readable)
+function buildPopupHtml(item) {
+  const lines = [];
+  
+  // Get coordinates for this item
+  const latlng = getLatLng(item);
+  const lat = latlng ? latlng[0] : null;
+  const lng = latlng ? latlng[1] : null;
+  
+  // Helper to get value from item or item.attributes
+  const getValue = (key) => item[key] || (item.attributes && item.attributes[key]) || null;
+  
+  // Get penalty type - prioritize _fetchedType if available
+  let typeKey = item._fetchedType ? String(item._fetchedType) : getTypeKey(item);
+  if ((!typeKey || typeKey === 'unknown') && item._fetchedType) {
+    typeKey = String(item._fetchedType);
+  }
+  
+  // Find corresponding info from penalties_list
+  let penaltyInfo = null;
+  if (penaltiesListData && penaltiesListData.length > 0) {
+    penaltyInfo = penaltiesListData.find(p => {
+      if (typeof p === 'string') return p === typeKey;
+      const pId = String(p.id || p.key || (p.attributes && (p.attributes.code || p.attributes.id)) || '');
+      const pCode = p.attributes && p.attributes.code ? String(p.attributes.code) : null;
+      return pId === typeKey || pCode === typeKey;
+    });
+  }
+  
+  // Title/Type
+  const typeName = penaltyInfo ? 
+    (penaltyInfo.name || penaltyInfo.title || (penaltyInfo.attributes && (penaltyInfo.attributes.description || penaltyInfo.attributes.name)) || typeKey) : 
+    typeKey;
+  lines.push('<div style="font-size:15px;font-weight:bold;margin-bottom:8px;color:#333;">' + escapeHtml(typeName) + '</div>');
+  
+  // Date
+  const dataData = getValue('data_data');
+  const dataHora = getValue('data_hora');
+  let dateStr = null;
+  
+  if (dataData && dataHora) {
+    // Combine date and time
+    const dateOnly = dataData.split('T')[0];
+    dateStr = dateOnly + 'T' + dataHora;
+  } else if (dataData) {
+    dateStr = dataData;
+  } else {
+    // Fallback to other common date fields
+    dateStr = getValue('created_at') || getValue('date') || getValue('timestamp') || getValue('data');
+  }
+  
+  if (dateStr) {
+    const formattedDate = formatDate(dateStr);
+    lines.push('<div style="margin-bottom:6px;"><strong>📅 Data:</strong> ' + escapeHtml(formattedDate) + '</div>');
+  }
+  
+  // Autoridade
+  const autoridade = getValue('autoridade') || getValue('authority') || getValue('auto');
+  if (autoridade) {
+    lines.push('<div style="margin-bottom:6px;"><strong>👮 Autoridade:</strong> ' + escapeHtml(String(autoridade)) + '</div>');
+  }
+  
+  // Coordinates with Google Street View link
+  if (lat && lng) {
+    const coordText = lat.toFixed(6) + ', ' + lng.toFixed(6);
+    const streetViewUrl = 'https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=' + lat + ',' + lng;
+    lines.push('<div style="margin-bottom:6px;"><strong>📍 Coordenadas:</strong> ' + escapeHtml(coordText) + '</div>');
+    lines.push('<div style="margin-bottom:8px;"><a href="' + escapeHtml(streetViewUrl) + '" target="_blank" style="color:#1a73e8;text-decoration:none;">🔍 Ver no Google Street View</a></div>');
+  }
+  
+  // Description/Details
+  const description = getValue('description') || getValue('detail') || getValue('details') || getValue('comment') || getValue('observacoes') || getValue('observacao');
+  if (description) {
+    lines.push('<div style="margin-bottom:6px;"><strong>Descrição:</strong></div>');
+    lines.push('<div style="margin-bottom:8px;color:#555;">' + escapeHtml(String(description)) + '</div>');
+  }
+  
+  // Legal basis from penalties_list
+  if (penaltyInfo) {
+    const baseLegal = penaltyInfo.base_legal || (penaltyInfo.attributes && penaltyInfo.attributes.base_legal) || null;
+    if (baseLegal) {
+      lines.push('<div style="margin-bottom:6px;"><strong>⚖️ Base Legal:</strong></div>');
+      lines.push('<div style="margin-bottom:8px;font-size:12px;color:#666;line-height:1.4;">' + escapeHtml(String(baseLegal)) + '</div>');
+    }
+  }
+  
+  // Additional location info
+  const city = getValue('city') || getValue('cidade') || getValue('municipality') || getValue('municipio');
+  const address = getValue('address') || getValue('morada') || getValue('street') || getValue('rua');
+  if (city || address) {
+    lines.push('<div style="margin-top:8px;padding-top:8px;border-top:1px solid #eee;font-size:12px;color:#666;">');
+    if (city) lines.push('<div>🏙️ ' + escapeHtml(String(city)) + '</div>');
+    if (address) lines.push('<div>🏠 ' + escapeHtml(String(address)) + '</div>');
+    lines.push('</div>');
+  }
+  
+  return lines.join('\n');
+}
+
+// Format date to human-readable format
+function formatDate(dateStr) {
+  try {
+    const date = new Date(dateStr);
+    if (isNaN(date.getTime())) return String(dateStr);
+    return date.toLocaleDateString('pt-PT', { 
+      year: 'numeric', 
+      month: 'long', 
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  } catch (e) {
+    return String(dateStr);
+  }
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>\"']/g, function (m) {
+    return ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[m];
+  });
+}
+
+// Fetch the list of penalty types and build filter controls
+async function fetchPenaltiesList() {
+  // Try the canonical endpoint first, but attempt fallbacks if the response is empty/unexpected.
+  try {
+    const res = await fetch(PENALTIES_LIST_URL);
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data) && data.length > 0) { buildFilterControls(data); return; }
+      if (data && Array.isArray(data.data) && data.data.length > 0) { buildFilterControls(data.data); return; }
+      if (data && typeof data === 'object') {
+        const vals = Object.values(data);
+        if (vals.length > 0) { buildFilterControls(vals); return; }
+      }
+      console.warn('penalties_list returned no usable items');
+    } else {
+      console.warn('penalties_list returned', res.status);
+    }
+  } catch (err) {
+    console.warn('Erro ao obter /penalties_list:', err);
+  }
+
+  // Try some common alternative locations (.json or trailing slash)
+  const altUrls = [PENALTIES_LIST_URL + '.json', PENALTIES_LIST_URL + '/'];
+  for (const u of altUrls) {
+    try {
+      const r = await fetch(u);
+      if (!r.ok) continue;
+      const d = await r.json();
+      if (Array.isArray(d) && d.length > 0) { buildFilterControls(d); return; }
+      if (d && Array.isArray(d.data) && d.data.length > 0) { buildFilterControls(d.data); return; }
+      if (d && typeof d === 'object') {
+        const vals = Object.values(d);
+        if (vals.length > 0) { buildFilterControls(vals); return; }
+      }
+    } catch (e) {
+      console.warn('fallback fetch failed for', u, e);
+    }
+  }
+
+  // Last resort: fetch a small sample from DATA_URL and derive types from the items
+  try {
+    const sampleUrl = new URL(DATA_URL);
+    const sr = await fetch(sampleUrl.toString());
+    if (sr.ok) {
+      const sd = await sr.json();
+      let items = Array.isArray(sd) ? sd : (sd && Array.isArray(sd.data) ? sd.data : (sd && typeof sd === 'object' ? Object.values(sd) : []));
+      const types = Array.from(new Set(items.map(it => getTypeKey(it)).filter(Boolean)));
+      if (types.length > 0) { buildFilterControls(types); return; }
+    } else {
+      console.warn('sample DATA_URL returned', sr.status);
+    }
+  } catch (e) {
+    console.warn('sample fetch failed', e);
+  }
+
+  // If everything failed, show a helpful message
+  filtersEl.innerHTML = '<div class="muted">Não foi possível carregar tipos. Verifique a URL: ' + PENALTIES_LIST_URL + '</div>';
+}
+
+// Create filter checkboxes from retrieved list
+function buildFilterControls(list) {
+  // Store the list for later use in popups
+  penaltiesListData = list || [];
+  
+  filtersEl.innerHTML = '';
+  if (!Array.isArray(list) || list.length === 0) {
+    filtersEl.innerHTML = '<div class="muted">Lista vazia</div>';
+    return;
+  }
+  list.forEach(entry => {
+    let id = null, name = null;
+    if (typeof entry === 'string') {
+      id = entry; name = entry;
+    } else if (entry && typeof entry === 'object') {
+      // prefer explicit id/code fields
+      id = entry.id || entry.key || (entry.attributes && (entry.attributes.code || entry.attributes.id)) || null;
+      // prefer a human-friendly description when available
+      name = entry.name || entry.title || (entry.attributes && (entry.attributes.description || entry.attributes.name)) || null;
+      // fallback to stringified id/object
+      if (!id) id = JSON.stringify(entry);
+      if (!name) name = String(id);
+    } else {
+      id = JSON.stringify(entry);
+      name = String(entry);
+    }
+
+    const key = String(id);
+
+    const wrapper = document.createElement('label');
+    wrapper.className = 'filter-item';
+    wrapper.innerHTML = `
+      <input type="checkbox" data-type="${escapeHtml(key)}" checked />
+      <span>${escapeHtml(name)}</span>
+    `;
+    filtersEl.appendChild(wrapper);
+  });
+
+  // initialize currentTypeFilter based on checked boxes (defaults applied above)
+  currentTypeFilter = new Set(Array.from(filtersEl.querySelectorAll('input[type=checkbox]:checked')).map(cb => cb.dataset.type));
+
+  // attach event
+  filtersEl.addEventListener('change', onFilterChange);
+}
+
+function onFilterChange() {
+  const checked = Array.from(filtersEl.querySelectorAll('input[type=checkbox]:checked')).map(cb => cb.dataset.type);
+  currentTypeFilter = new Set(checked);
+  loadData();
+}
+
+// Select all / none
+document.getElementById('selectAll').addEventListener('click', () => {
+  const boxes = Array.from(filtersEl.querySelectorAll('input[type=checkbox]'));
+  boxes.forEach(cb => cb.checked = true);
+  onFilterChange();
+});
+
+document.getElementById('selectNone').addEventListener('click', () => {
+  const boxes = Array.from(filtersEl.querySelectorAll('input[type=checkbox]'));
+  boxes.forEach(cb => cb.checked = false);
+  onFilterChange();
+});
+
+// Load data
+async function loadData() {
+  loadedCountEl.textContent = '...';
+  clearData();
+
+  // Determine whether the API expects a per-type path (e.g. /penalties/:type)
+  const hasFilterControls = filtersEl.querySelectorAll('input[type=checkbox]').length > 0;
+
+  // Helper to find an array of items that contain geolocation fields anywhere in a nested response
+  function findGeoArray(obj, depth = 0) {
+    if (!obj || depth > 6) return null;
+    if (Array.isArray(obj)) {
+      if (obj.length > 0 && obj.some(it => getLatLng(it))) return obj;
+      for (const el of obj) {
+        const found = findGeoArray(el, depth + 1);
+        if (found) return found;
+      }
+      return null;
+    }
+    if (typeof obj === 'object') {
+      for (const k of Object.keys(obj)) {
+        const found = findGeoArray(obj[k], depth + 1);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
+  // Helper to normalize response into an array of items (robust against nested shapes)
+  const normalize = data => {
+    if (!data) return [];
+    if (Array.isArray(data)) return data;
+    if (data && Array.isArray(data.data)) return data.data;
+    if (data && Array.isArray(data.items)) return data.items;
+    if (data && Array.isArray(data.results)) return data.results;
+    // try common single-level object -> values
+    if (data && typeof data === 'object') {
+      const vals = Object.values(data);
+      // if values are array and contain geo items, pick first
+      for (const v of vals) {
+        if (Array.isArray(v) && v.some(it => getLatLng(it))) return v;
+      }
+    }
+    // deep search for any nested array with geo items
+    const found = findGeoArray(data);
+    return found || [];
+  };
+
+  // Debug helper: write to debug panel and console
+  function debug(msg) {
+    try {
+      const el = document.getElementById('debug');
+      if (el) el.textContent = msg;
+    } catch (e) { /* ignore */ }
+    console.log('[map-debug]', msg);
+  }
+
+  try {
+    let aggregatedItems = [];
+
+    if (hasFilterControls) {
+      // Determine which types to request. If user selected none (empty set), don't fetch anything.
+      let typesAvailable = Array.from(filtersEl.querySelectorAll('input[type=checkbox]')).map(cb => cb.dataset.type);
+      let typesToFetch = currentTypeFilter && currentTypeFilter.size > 0 ? Array.from(currentTypeFilter) : null;
+
+      if (typesToFetch && typesToFetch.length > 0) {
+        // Fetch each type endpoint in parallel: DATA_URL/<type>
+        const fetchPromises = typesToFetch.map(type => {
+          const url = new URL(DATA_URL + '/' + encodeURIComponent(type));
+          return fetch(url.toString()).then(res => ({ res, type })).catch(err => ({ err, type }));
+        });
+
+        const results = await Promise.all(fetchPromises);
+
+        // Collect successful responses
+        for (const r of results) {
+          if (r.err) {
+            console.warn('Erro ao buscar tipo', r.type, r.err);
+            continue;
+          }
+          const res = r.res;
+          if (!res.ok) {
+            console.warn('Requisição retornou', res.status, 'for type', r.type);
+            continue;
+          }
+          const data = await res.json();
+          let items = normalize(data);
+          // tag items with the type we fetched from so we can filter them later
+          items = items.map(it => {
+            try { if (it && typeof it === 'object') it._fetchedType = r.type; } catch(e) {}
+            return it;
+          });
+          console.log('[map-debug] fetched type', r.type, '-> items:', items.length);
+          aggregatedItems = aggregatedItems.concat(items);
+        }
+      }
+    } else if (!hasFilterControls) {
+      // No filter controls exist, fallback to generic DATA_URL
+      const url = new URL(DATA_URL);
+      const res = await fetch(url.toString());
+      if (!res.ok) throw new Error('Erro ao carregar dados: ' + res.status);
+      const data = await res.json();
+      const items = normalize(data);
+      console.log('[map-debug] fetched generic DATA_URL -> items:', items.length);
+      aggregatedItems = aggregatedItems.concat(items);
+    }
+
+    // Add markers (batch into array to avoid repeated DOM updates)
+    let withCoords = 0, withoutCoords = 0, outOfPortugal = 0;
+    const newMarkers = [];
+    for (const item of aggregatedItems) {
+      const latlng = getLatLng(item);
+      if (!latlng) { withoutCoords++; continue; }
+      // latlng is [lat, lng]
+      const lat = Number(latlng[0]);
+      const lng = Number(latlng[1]);
+      if (!isWithinPortugalBounds(lat, lng)) { outOfPortugal++; continue; }
+      withCoords++;
+      let typeKey = getTypeKey(item);
+      if ((!typeKey || typeKey === 'unknown') && item && item._fetchedType) {
+        typeKey = String(item._fetchedType);
+      }
+      const marker = L.marker(latlng, { title: typeKey });
+      // Defer constructing popup HTML until user clicks (saves CPU/memory for large sets)
+      marker.on('click', function () {
+        if (!this.getPopup()) {
+          this.bindPopup(buildPopupHtml(item), { maxWidth: 450 }).openPopup();
+        }
+      });
+      marker._ourType = typeKey; // store for filtering
+      newMarkers.push(marker);
+      allItems.push({ item, marker, typeKey });
+    }
+
+    // Add all markers to the cluster in one batch operation
+    if (newMarkers.length) markers.addLayers(newMarkers);
+
+    debug('fetched: ' + aggregatedItems.length + ' items — with coords: ' + withCoords + ', without coords: ' + withoutCoords + ', out-of-Portugal: ' + outOfPortugal);
+    loadedCountEl.textContent = allItems.length;
+    applyFilters();
+
+    if (markers.getLayers().length > 0) {
+      document.getElementById('fit').disabled = false;
+      map.fitBounds(markers.getBounds(), { maxZoom: 16 });
+    } else {
+      document.getElementById('fit').disabled = true;
+    }
+  } catch (err) {
+    console.error(err);
+    loadedCountEl.textContent = 'Erro';
+    alert('Erro ao carregar dados: ' + err.message + '\nVerifique a URL DATA_URL e CORS.');
+  }
+}
+
+// Apply filters to markers
+function applyFilters() {
+  let visible = 0;
+  // If no filter controls (not loaded) => show everything
+  const hasFilters = filtersEl.querySelectorAll('input[type=checkbox]').length > 0;
+  // Helper: recursively search item for string values that match any selected filter
+  function itemMatchesFilter(obj, filterSet, depth = 0) {
+    if (!obj || depth > 8) return false;
+    // prepare filter strings
+    const filters = Array.from(filterSet).map(f => String(f).toLowerCase());
+    if (typeof obj === 'string' || typeof obj === 'number') {
+      const s = String(obj).toLowerCase();
+      for (const f of filters) if (s.includes(f) || f.includes(s)) return true;
+      return false;
+    }
+    if (Array.isArray(obj)) {
+      for (const v of obj) if (itemMatchesFilter(v, filterSet, depth+1)) return true;
+      return false;
+    }
+    if (typeof obj === 'object') {
+      // check keys too (some APIs put type labels in keys)
+      for (const k of Object.keys(obj)) {
+        const kl = String(k).toLowerCase();
+        for (const f of filters) if (kl.includes(f) || f.includes(kl)) return true;
+      }
+      for (const v of Object.values(obj)) if (itemMatchesFilter(v, filterSet, depth+1)) return true;
+      return false;
+    }
+    return false;
+  }
+
+  allItems.forEach(entry => {
+    const type = entry.typeKey;
+    let shouldShow = (!hasFilters) || currentTypeFilter.size === 0 || currentTypeFilter.has(type);
+    if (!shouldShow && hasFilters && currentTypeFilter.size > 0) {
+      // try matching against the item's content (attributes, nested fields)
+      shouldShow = itemMatchesFilter(entry.item, currentTypeFilter);
+    }
+
+    if (shouldShow) {
+      markers.addLayer(entry.marker);
+      visible++;
+    } else {
+      markers.removeLayer(entry.marker);
+    }
+  });
+  visibleCountEl.textContent = visible;
+}
+
+// Clear currently loaded markers
+function clearData() {
+  markers.clearLayers();
+  allItems = [];
+  visibleCountEl.textContent = 0;
+  loadedCountEl.textContent = 0;
+}
+
+// UI buttons
+document.getElementById('fit').addEventListener('click', () => {
+  if (markers.getLayers().length === 0) return alert('Nenhum marcador visível.');
+  map.fitBounds(markers.getBounds(), { maxZoom: 16 });
+});
+
+// init
+(async function init() {
+  // Setup mobile UI before anything else
+  setupMobileUI();
+  // initial load of types (wait so we don't call generic /penalties before types exist)
+  try {
+    await fetchPenaltiesList();
+  } catch (e) {
+    console.warn('fetchPenaltiesList failed during init', e);
+  }
+  loadData();
+})();
